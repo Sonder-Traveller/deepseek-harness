@@ -1009,6 +1009,39 @@ for line in sys.stdin:
     client.close()
 
 
+def test_client_restart_starts_with_clean_consumption_queues(tmp_path: Path) -> None:
+    script = tmp_path / "fake_runtime.py"
+    script.write_text(
+        """
+import json
+import sys
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"serverInfo": {"name": "fake-runtime"}}}), flush=True)
+    elif method == "shutdown":
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {}}), flush=True)
+        break
+""".strip()
+    )
+
+    client = HarnessClient(_launch_args=(sys.executable, str(script)))
+    client.start()
+    client.initialize(provider="deepseek-official", cwd="/workspace", model="dsagent")
+    client.close()
+    # A reused client starts a fresh lifecycle: the previous close() failed
+    # every waiter with a terminal transport exception, which must not survive
+    # into the new runtime. Read the consumption queues directly because the
+    # next_* accessors block until a new item arrives.
+    client.start()
+    client.initialize(provider="deepseek-official", cwd="/workspace", model="dsagent")
+    assert client._notifications.qsize() == 0
+    assert client._requests.qsize() == 0
+    client.close()
+
+
 def test_runtime_closed_error_includes_stderr_tail(tmp_path: Path) -> None:
     script = tmp_path / "crashing_runtime.py"
     script.write_text(

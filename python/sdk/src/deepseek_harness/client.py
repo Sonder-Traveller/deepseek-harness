@@ -20,6 +20,8 @@ from .models import IncomingRequest, InitializeResponse, JsonObject, JsonValue, 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 NotificationFilter: TypeAlias = Callable[[Notification], bool]
 
+_ItemT = TypeVar("_ItemT")
+
 
 @dataclass(slots=True)
 class HarnessConfig:
@@ -73,6 +75,15 @@ class HarnessClient:
             return
         with self._lock:
             self._session_parents.clear()
+            # A restart begins a fresh lifecycle: the previous close() failed
+            # every waiter with a terminal transport exception that this module
+            # leaves in the shared consumption queues. Drop that state so a
+            # reused client reads notifications and requests from the new
+            # runtime only, instead of re-raising a stale close error. Reaping
+            # the old process already completed before close() returned.
+            self._responses.clear()
+            _drain(self._notifications)
+            _drain(self._requests)
         env = os.environ.copy()
         if self.config.env:
             env.update(self.config.env)
@@ -609,3 +620,12 @@ class _ShutdownResponse(BaseModel):
 
 def _int_or_none(value: object) -> int | None:
     return value if isinstance(value, int) else None
+
+
+def _drain(q: queue.Queue[_ItemT]) -> None:
+    """Remove every currently queued item, dropping the oldest first."""
+    while True:
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            return
